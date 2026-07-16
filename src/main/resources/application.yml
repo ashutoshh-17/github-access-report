@@ -1,0 +1,23 @@
+server:
+  port: 8080
+
+github:
+  api:
+    base-url: https://api.github.com
+    # Read from GITHUB_TOKEN env var
+    token: ${GITHUB_TOKEN:}
+    page-size: 100
+    # Number of concurrent requests for fetching collaborators
+    collaborator-fetch-concurrency: 10
+    # Request timeout per call to GitHub
+    timeout-seconds: 15
+
+spring:
+  cache:
+    cache-names: accessReport
+    caffeine:
+      spec: maximumSize=50,expireAfterWrite=5m
+
+logging:
+  level:
+    com.cloudeagle.accessreport: INFO
