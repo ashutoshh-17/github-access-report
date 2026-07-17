@@ -110,48 +110,25 @@ GET /api/v1/health
 
 ## 4. Assumptions and design decisions
 
-- **Aggregation direction (user → repos, not repo → users):** The assignment asks for
-  "which repositories each user has access to," so the top-level response is a list of
-  users, each carrying their list of accessible repositories and permission level. The
-  underlying data is fetched repo-first (that's how GitHub's API is shaped — there's no
-  "list all org members with all their repo access" endpoint) and then pivoted into the
-  user-first view server-side.
+- **Why user → repos, not repo → users:** The task asks "which repos can each user access", so I made the response user-first. But GitHub has no single API for that — I still fetch repo-by-repo first (list repos, get collaborators for each), then flip it into a user-first shape before returning it.
 
-- **Permission source:** GitHub's collaborators endpoint
-  (`GET /repos/{owner}/{repo}/collaborators?affiliation=all`) is used with
-  `affiliation=all` so both directly-added collaborators and outside collaborators are
-  captured, not just direct members. The highest permission level per user/repo pair is
-  derived from the `role_name` field when present, falling back to the `permissions` map
-  (`admin` > `maintain` > `push`/write > `triage` > `read`).
+- **Where permission comes from:** Using `GET /repos/{owner}/{repo}/collaborators?affiliation=all` so outside collaborators show up too, not just direct members. I check the `role_name` field first, and if it's missing, fall back to the `permissions` map (admin > maintain > write > triage > read).
 
-- **Archived/disabled repos are excluded** from the report by default, since they're
-  typically not relevant to an active access-governance view.
+- **Archived/disabled repos are skipped** — not useful for an active access report.
 
-- **Concurrency, not sequential calls (the scale requirement):** Repository listing is
-  paginated automatically (following GitHub's `Link` header `rel="next"`). Once the repo
-  list is known, collaborator lookups for each repo are fanned out **concurrently**
-  using a reactive `WebClient` + `Flux.flatMap(..., concurrency)`, bounded by
-  `github.api.collaborator-fetch-concurrency` (default 10) so a 100+ repo org doesn't
-  fire 100+ requests all at once and blow through GitHub's rate limit, but also doesn't
-  wait on them one at a time.
+- **Concurrent calls, not a loop (the scale part):** Repo listing follows GitHub's `Link` header for pagination. For collaborators, looping one repo at a time would be too slow at 100+ repos, so I used WebClient + `flatMap` to fetch multiple repos in parallel, capped at 10 concurrent calls (`collaborator-fetch-concurrency`) to avoid hitting rate limits.
 
-- **Rate limit handling:** If GitHub responds with `403`/`429` due to rate limiting,
-  the client retries with exponential backoff (up to 3 attempts) rather than failing the
-  whole report on a transient limit hit.
+- **Rate limits:** On a 403/429, it retries with backoff (up to 3 times) instead of failing outright.
 
-- **Caching:** Report results are cached in-memory for 5 minutes (Caffeine,
-  `spring.cache`) per organization, since access data doesn't change second-to-second
-  and repeated demo/testing calls shouldn't burn API quota unnecessarily. This is a
-  simple in-memory cache appropriate for a single-instance deployment; a multi-instance
-  production deployment would swap this for a shared cache (e.g. Redis).
+- **Caching:** Each org's report is cached for 5 minutes (Caffeine, in-memory) so repeated test calls don't burn rate limit. Would need Redis instead for multi-instance deployment.
 
-- **Error handling & Missing Access:** A `GlobalExceptionHandler` maps global GitHub API failures to clean JSON error responses. Crucially, **if the token does not have access to a specific repository's collaborators URL**, the application does not crash or fail the entire request. Instead, it catches the 403/404 error, logs a graceful warning, and simply skips that repository. This ensures that the report generation continues uninterrupted for the repositories the user *does* have access to.
+- **Missing access:** If the token can't read a specific repo's collaborators, that repo is skipped with a logged warning instead of failing the whole report.
 
-## 5. Future Scope / TODOs
+## 5. Future scope
 
-- **Team-based Access:** Currently, GitHub Teams that grant repo access without an individual collaborator entry are not fully tracked. Calling `GET /orgs/{org}/teams` would fix this.
-- **GraphQL Migration:** We could explore migrating from REST API v3 to GraphQL to drastically reduce the number of HTTP requests for fetching collaborators.
-- **Shared Caching:** Swap the in-memory Caffeine cache with Redis for a multi-instance production environment.
+- **GitHub Teams:** Access granted via team membership (not individual collaborators) isn't tracked yet — would need `GET /orgs/{org}/teams`.
+- **GraphQL:** Could replace REST to cut down the number of requests.
+- **Redis cache:** For scaling across multiple instances.
 
 ---
 
